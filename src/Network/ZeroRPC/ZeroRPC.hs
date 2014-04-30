@@ -1,9 +1,12 @@
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE PackageImports #-}
 
 module Network.ZeroRPC where
 
 import Control.Applicative ((<$>), (<*>))
-import System.ZMQ4.Monadic (runZMQ, socket, connect, send, receive, Req(..), liftIO)
+import qualified "mtl" Control.Monad.State.Lazy as S
+import "mtl" Control.Monad.Trans (lift)
+import System.ZMQ4.Monadic (runZMQ, socket, connect, send, receive, Req(..), liftIO, Receiver, Socket, ZMQ, Sender)
 import Data.MessagePack (pack, unpack, toObject, Object(..), OBJECT, Packable, from, Unpackable(..))
 import Data.Text (Text)
 import Data.ByteString.Lazy (toStrict)
@@ -64,17 +67,32 @@ ping serverName = return ("pong", serverName)
 inspect :: Event [String]
 inspect = event "_zerorpc_inspect" []
 
-sendEvent sock event@(Event Nothing hs n v) = do
+ensureMsgId event@(Event Nothing hs n v) = do
     uuid <- liftIO nextRandom
-    sendEvent sock (Event (Just $ toStrict $ toByteString uuid) hs n v)
-sendEvent sock event = do
-    send sock [] (toStrict $ pack event)
+    return $ Event (Just $ toStrict $ toByteString uuid) hs n v
+ensureMsgId event = return event
+
+sendEvent :: (Sender t, Packable a) => Event a -> S.StateT (Socket z t) (ZMQ z) ()
+sendEvent event = do
+    sock <- S.get
+    event' <- ensureMsgId event
+    lift $ send sock [] (toStrict $ pack event')
+
+recvEvent :: (Receiver t, Unpackable a) => S.StateT (Socket z t) (ZMQ z) (Event a)
+recvEvent = do
+    sock <- S.get
+    result <- lift $ receive sock
+    return $ unpack result
+
+main' :: S.StateT (Socket z Req) (ZMQ z) (Event Object)
+main' = do
+    req <- lift $ socket Req
+    lift $ connect req "tcp://127.0.0.1:1234"
+    S.put req
+    sendEvent inspect
+    recvEvent
 
 main = do
-    value <- runZMQ $ do
-        req <- socket Req
-        connect req "tcp://127.0.0.1:1234"
-        sendEvent req inspect
-        result <- receive req
-        return $ unpack result
-    putStr $ ppShow (value :: Event Object)
+    value <- runZMQ $ S.evalStateT main' undefined
+    putStrLn $ ppShow (value :: Event Object)
+
