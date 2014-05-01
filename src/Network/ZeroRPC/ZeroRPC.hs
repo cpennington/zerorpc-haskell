@@ -84,8 +84,8 @@ recvEvent = do
     result <- lift $ receive sock
     return $ unpack result
 
-main' :: S.StateT (Socket z Req) (ZMQ z) (Event Object)
-main' = do
+testInspect :: S.StateT (Socket z Req) (ZMQ z) (Event Object)
+testInspect = do
     req <- lift $ socket Req
     lift $ connect req "tcp://127.0.0.1:1234"
     S.put req
@@ -93,6 +93,6 @@ main' = do
     recvEvent
 
 main = do
-    value <- runZMQ $ S.evalStateT main' undefined
+    value <- runZMQ $ S.evalStateT testInspect undefined
     putStrLn $ ppShow (value :: Event Object)
 
