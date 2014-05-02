@@ -15,6 +15,7 @@ import Text.Show.Pretty (ppShow)
 
 import Network.ZeroRPC.Types (Header(..), Event(..), Name(..))
 import Network.ZeroRPC.Wire (event, sendEvent, recvEvent)
+import Network.ZeroRPC.Channel
 
 heartbeat = event "_zpc_hb" ()
 more = event "_zpc_more"
