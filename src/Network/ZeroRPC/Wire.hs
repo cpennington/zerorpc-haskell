@@ -8,14 +8,14 @@ import Data.MessagePack (pack, unpack, toObject, from)
 import System.ZMQ4.Monadic (Req(..), Receiver, Socket, ZMQ, Sender)
 import System.ZMQ4.Monadic (runZMQ, socket, connect, send, receive, liftIO)
 import Data.UUID.V4 (nextRandom)
-import Data.Maybe (Maybe(..), listToMaybe, fromJust)
+import Data.Maybe (Maybe(..), listToMaybe)
 import Data.ByteString (ByteString)
 import Control.Monad.IO.Class (MonadIO)
 import Data.ByteString.Lazy (toStrict)
-import Data.UUID (toByteString)
+import Data.UUID (toASCIIBytes)
 import "mtl" Control.Monad.Trans (lift)
 
-import Network.ZeroRPC.Types (Header(..), Event(..), Name(..), ZeroRPC)
+import Network.ZeroRPC.Types (Header(..), Event(..), Name(..))
 
 msgIdKey :: Object
 msgIdKey = toObject ("message_id" :: String)
@@ -48,7 +48,7 @@ ensureMsgId :: MonadIO m => Event a -> m (Event a)
 ensureMsgId e = do
     uuid <- liftIO nextRandom
     let isMsgId (k, v) = k == msgIdKey
-        newMsgId = toStrict $ toByteString uuid
+        newMsgId = toASCIIBytes uuid
     return $ setDefault msgIdKey newMsgId e
 
 ensureVersion3 :: Event a -> Event a
@@ -72,14 +72,12 @@ setDefault = replaceOrAppendHeader id
 setHeader :: (OBJECT k, OBJECT v) => k -> v -> Event a -> Event a
 setHeader key val = replaceOrAppendHeader (const $ key .= val) key val
 
-sendEvent :: (Sender t, Packable a) => Event a -> ZeroRPC z t ()
-sendEvent e = do
-    sock <- S.get
-    e' <- ensureMsgId $ ensureVersion3 e
-    lift $ send (fromJust sock) [] $ toStrict $ pack e'
+sendEvent :: (Sender t, Packable a) => Socket z t -> Event a -> ZMQ z ()
+sendEvent sock event = do
+    event' <- ensureMsgId $ ensureVersion3 event
+    send sock [] $ toStrict $ pack event'
 
-recvEvent :: (Receiver t, Unpackable a) => ZeroRPC z t (Event a)
-recvEvent = do
-    sock <- S.get
-    result <- lift $ receive (fromJust sock)
+recvEvent :: (Receiver t, Unpackable a) => Socket z t -> ZMQ z (Event a)
+recvEvent sock = do
+    result <- receive sock
     return $ unpack result

@@ -12,5 +12,3 @@ type Name = Text
 
 data Event a = Event ![Header] !Name !a
     deriving Show
-
-type ZeroRPC z t a = StateT (Maybe (Socket z t)) (ZMQ z) a
