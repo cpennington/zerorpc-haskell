@@ -28,9 +28,6 @@ import Debug.Trace
 
 ping serverName = return ("pong", serverName)
 
-inspect :: Message Object
-inspect = Msg [] "_zerorpc_inspect" (ObjectArray [])
-
 sendAndPrint :: ZChannels Object -> Message Object -> IO ()
 sendAndPrint zchans msg = do
     zchan <- atomically $ mkChannel zchans
@@ -44,7 +41,7 @@ testInspect = do
             connect req "tcp://127.0.0.1:1234"
             return req
     zchans <- setupZChannels mkSock
-    sendAndPrint zchans inspect
+    sendAndPrint zchans Inspect
 
 printChannel :: TBQueue (Message Object) -> IO ()
 printChannel queue = do

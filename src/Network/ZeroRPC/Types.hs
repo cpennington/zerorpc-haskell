@@ -23,4 +23,5 @@ data Message a = Msg ![Header] !Name !a
                | More !a
                | Stream !a
                | StreamDone
+               | Inspect
     deriving Show
