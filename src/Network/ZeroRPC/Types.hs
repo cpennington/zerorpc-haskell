@@ -18,7 +18,7 @@ data Event = Event {
   , eArgs :: !Object
 } deriving Show
 
-data Message a = Msg ![Header] !Name !a
+data Message a = Msg !Name !a
                | Heartbeat
                | More !a
                | Stream !a

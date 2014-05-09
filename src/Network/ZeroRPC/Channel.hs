@@ -142,12 +142,12 @@ _toEvent chan headers name value = do
 toEvent :: (OBJECT a) => ZChan a -> Message a -> STM Event
 toEvent chan Heartbeat = _toEvent chan [] "_zpc_hb" $ ObjectArray []
 toEvent chan Inspect = _toEvent chan [] "_zerorpc_inspect" $ ObjectArray []
-toEvent chan (Msg headers name value) = _toEvent chan headers name $ toObject value
+toEvent chan (Msg name value) = _toEvent chan [] name $ toObject value
 
 toMsg :: (OBJECT a) => ZChan a -> Event -> STM (Message a)
 toMsg chan event = do
     getResponseTo chan (eMsgId event)
-    return $ Msg (eHeaders event) (eName event) $ fromObject $ eArgs event
+    return $ Msg (eName event) $ fromObject $ eArgs event
 
 mkGen :: ZChannels a -> STM StdGen
 mkGen zchans = do
