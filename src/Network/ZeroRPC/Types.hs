@@ -20,7 +20,7 @@ data Event = Event {
 
 data Message a = Msg !Name !a
                | Heartbeat
-               | More !a
+               | More !Int
                | Stream !a
                | StreamDone
                | Inspect
