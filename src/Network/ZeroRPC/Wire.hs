@@ -4,18 +4,18 @@ module Network.ZeroRPC.Wire where
 
 import qualified "mtl" Control.Monad.State.Lazy as S
 import Data.MessagePack (Object(ObjectMap), OBJECT, Packable, Unpackable(get))
-import Data.MessagePack (pack, unpack, toObject, from)
+import Data.MessagePack (pack, unpack, toObject, from, fromObject)
 import System.ZMQ4.Monadic (Req(..), Receiver, Socket, ZMQ, Sender)
 import System.ZMQ4.Monadic (runZMQ, socket, connect, send, receive, liftIO)
 import Data.UUID.V4 (nextRandom)
-import Data.Maybe (Maybe(..), listToMaybe)
+import Data.Maybe (Maybe(..), listToMaybe, maybeToList, isNothing, fromJust)
 import Data.ByteString (ByteString)
+import Control.Monad (when)
 import Control.Monad.IO.Class (MonadIO)
 import Data.ByteString.Lazy (toStrict)
-import Data.UUID (toASCIIBytes)
 import "mtl" Control.Monad.Trans (lift)
 
-import Network.ZeroRPC.Types (Header(..), Event(..), Name(..))
+import Network.ZeroRPC.Types (Header(..), Event(..), Name(..), Message(..))
 
 msgIdKey :: Object
 msgIdKey = toObject ("message_id" :: String)
@@ -23,59 +23,45 @@ msgIdKey = toObject ("message_id" :: String)
 versionKey :: Object
 versionKey = toObject ("v" :: String)
 
+replyToKey :: Object
+replyToKey = toObject ("response_to" :: String)
+
 instance (Packable a) => Packable (Event a) where
-    from (Event hs n v) = from (ObjectMap hs, n, v)
+    from event = from (ObjectMap hs, n, v)
+        where
+            hs = maybeToList replyTo ++ msgId:version:(strip [msgIdKey, versionKey] $ eHeaders event)
+            msgId = (msgIdKey .= eMsgId event)
+            version = (versionKey .= eVersion event)
+            replyTo = fmap (replyToKey .=) (eResponseTo event)
+            n = eName event
+            v = eArgs event
 
 instance (Unpackable a) => Unpackable (Event a) where
     get = do
-        (ObjectMap headers, name, value) <- get
-        return $ Event headers name value
+        (ObjectMap headers, name, args) <- get
+        let msgId = lookup msgIdKey headers
+            version = lookup versionKey headers
+            replyTo = lookup replyToKey headers
+        when (isNothing msgId) $ fail "message_id is required"
+        when (isNothing version) $ fail "version is required"
+        return $ Event {
+            eMsgId = (fromObject $ fromJust msgId)
+          , eVersion = (fromObject $ fromJust version)
+          , eResponseTo = (fmap fromObject replyTo)
+          , eHeaders = (strip [msgIdKey, versionKey, replyToKey] headers)
+          , eName = name
+          , eArgs = args
+        }
 
-event :: Name -> a -> Event a
-event = Event []
+strip :: [Object] -> [Header] -> [Header]
+strip keys = filter (\(k, v) -> k `elem` keys)
 
 (.=) :: (OBJECT k, OBJECT v) => k -> v -> Header
 key .= value = (toObject key, toObject value)
 {-# INLINE (.=) #-}
 
-msgId :: ByteString -> Header
-msgId i = msgIdKey .= i
-
-version3 :: Header
-version3 = versionKey .= (3 :: Int)
-
-ensureMsgId :: MonadIO m => Event a -> m (Event a)
-ensureMsgId e = do
-    uuid <- liftIO nextRandom
-    let isMsgId (k, v) = k == msgIdKey
-        newMsgId = toASCIIBytes uuid
-    return $ setDefault msgIdKey newMsgId e
-
-ensureVersion3 :: Event a -> Event a
-ensureVersion3 = setHeader versionKey (3 :: Int)
-
-replaceOrAppend :: (a -> Bool) -> (a -> a) -> a -> [a] -> [a]
-replaceOrAppend cond f d [] = [d]
-replaceOrAppend cond f d (x:xs) | cond x = (f x):xs
-replaceOrAppend cond f d (x:xs) | otherwise = x:(replaceOrAppend cond f d xs)
-
-replaceOrAppendHeader :: (OBJECT k, OBJECT v) => (Header -> Header) -> k -> v -> Event a -> Event a
-replaceOrAppendHeader update key val (Event hs n v) = Event hs' n v
-    where
-        key' = toObject key
-        header = key' .= toObject val
-        hs' = replaceOrAppend ((== key') . fst) update header hs
-
-setDefault :: (OBJECT k, OBJECT v) => k -> v -> Event a -> Event a
-setDefault = replaceOrAppendHeader id
-
-setHeader :: (OBJECT k, OBJECT v) => k -> v -> Event a -> Event a
-setHeader key val = replaceOrAppendHeader (const $ key .= val) key val
-
 sendEvent :: (Sender t, Packable a) => Socket z t -> Event a -> ZMQ z ()
-sendEvent sock event = do
-    event' <- ensureMsgId $ ensureVersion3 event
-    send sock [] $ toStrict $ pack event'
+sendEvent sock event = send sock [] $ toStrict $ pack event
 
 recvEvent :: (Receiver t, Unpackable a) => Socket z t -> ZMQ z (Event a)
 recvEvent sock = do

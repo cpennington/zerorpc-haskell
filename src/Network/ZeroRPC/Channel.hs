@@ -6,37 +6,41 @@ module Network.ZeroRPC.Channel where
 import Control.Applicative ((<$>), (<*>), pure)
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM (atomically, STM)
-import Control.Concurrent.STM (isEmptyTBQueue, isFullTBQueue, newTBQueue, readTBQueue, writeTBQueue, TBQueue)
-import Control.Concurrent.STM (readTVar, writeTVar, newTVar, TVar)
+import Control.Concurrent.STM (isEmptyTBQueue, isFullTBQueue, newTBQueue, newTBQueueIO, readTBQueue, writeTBQueue, TBQueue)
+import Control.Concurrent.STM (readTVar, writeTVar, newTVarIO, newTVar, TVar, modifyTVar')
 import Control.Exception (throw)
-import Control.Monad (forever, void)
-import Control.Monad (when, liftM, filterM)
+import Control.Monad (forever, void, when, liftM, filterM)
 import Data.ByteString (ByteString)
 import Data.List (lookup, find)
-import Data.Maybe (fromJust, listToMaybe)
+import Data.Maybe (fromJust, listToMaybe, isNothing)
 import Data.MessagePack (Object, toObject, fromObject)
 import Data.MessagePack (Packable, Unpackable)
 import System.ZMQ4.Monadic (Sender, Receiver, liftIO, runZMQ, async, ZMQ, Socket, Poll(..), poll)
 import qualified System.ZMQ4.Monadic as Z
 import "mtl" Control.Monad.Trans (lift)
+import System.Random (StdGen, Random(..), split, newStdGen)
+import Data.UUID (toASCIIBytes)
 
-import Network.ZeroRPC.Types (Event(..))
-import Network.ZeroRPC.Wire (msgIdKey, (.=), sendEvent, recvEvent, setDefault, ensureVersion3, ensureMsgId)
+import Network.ZeroRPC.Types (Event(..), Message(..))
+import Network.ZeroRPC.Wire (msgIdKey, (.=), sendEvent, recvEvent, replyToKey)
 
 import Control.Exception (Exception)
 import Control.Concurrent.STM (throwSTM, catchSTM, tryPeekTBQueue)
 import Debug.Trace
 
 data ZChan a = ZChan {
-    zcOut :: TBQueue (Event a)
-  , zcIn :: TBQueue (Event a)
+    zcOut :: TBQueue (Message a)
+  , zcIn :: TBQueue (Message a)
   , zcId :: TVar (Maybe ByteString)
+  , zcGen :: TVar StdGen
 }
 
 data ZChannels a = ZChannels {
     zcsIn :: TBQueue (Event a)
   , zcsOut :: TBQueue (Event a)
   , zcsChans :: TVar [ZChan a]
+  , zcsGen :: TVar StdGen
+  , zcsNewChans :: TBQueue (ZChan a)
 }
 
 data Created a = New a | Existing a
@@ -45,9 +49,6 @@ raw x = case x of
     New x' -> x'
     Existing x' -> x'
 
-replyToKey :: Object
-replyToKey = toObject ("response_to" :: String)
-
 ensureReplyTo :: ZChan a -> Event a -> STM (Event a)
 ensureReplyTo chan event = do
     cid <- readTVar $ zcId chan
@@ -55,41 +56,37 @@ ensureReplyTo chan event = do
         Nothing -> do
             writeTVar (zcId chan) $ Just $ chanId event
             return event
-        Just id -> return $ setDefault replyToKey id event
+        Just id -> return $ event {eResponseTo = Just id}
 
 bufferSize = 100
 
 chanId :: Event a -> ByteString
-chanId (Event hs n v) = fromObject $ case lookup replyToKey hs of
-    Nothing -> fromJust $ lookup msgIdKey hs
-    Just replyTo -> replyTo
+chanId event = maybe (eMsgId event) id (eResponseTo event)
 
-getZChan :: ZChannels a -> Event a -> STM (Created (ZChan a))
+getZChan :: ZChannels a -> Event a -> STM (Maybe (ZChan a))
 getZChan zchans event = do
     chans <- readTVar $ zcsChans zchans
     let cid = chanId event
-    newChan <- ZChan <$> (newTBQueue bufferSize) <*> (newTBQueue bufferSize) <*> (newTVar Nothing)
     chanIds <- mapM (readTVar . zcId) chans
-    case (find ((== (Just cid)) . fst) $ zip chanIds chans) of
-        Nothing -> do
-            writeTVar (zcsChans zchans) (newChan:chans)
-            return $ New newChan
-        Just (_, chan) -> return $ Existing chan
+    return $ lookup (Just cid) $ zip chanIds chans
 
 multiplexRecv :: (Show a) => ZChannels a -> IO ()
 multiplexRecv zchans = atomically $ do
     let incoming = zcsIn zchans
     chans <- readTVar $ zcsChans zchans
     event <- readTBQueue incoming
-    chan <- getZChan zchans event
-    event' <- ensureReplyTo (raw chan) event
-    writeTBQueue (zcIn $ raw chan) (traceShow ("multirecv", event') $ event')
+    maybeChan <- getZChan zchans event
+    chan <- case maybeChan of
+        Nothing -> mkChannel zchans
+        Just chan -> return chan
+    msg <- toMsg chan event
+    writeTBQueue (zcIn chan) (traceShow ("multirecv", msg) $ msg)
 
 _multiplexSend :: (Show a) => TBQueue (Event a) -> ZChan a -> STM ()
-_multiplexSend outgoing zchan = do
-    event  <- readTBQueue $ zcOut zchan
-    event' <- ensureReplyTo zchan event
-    writeTBQueue outgoing (traceShow ("multisend", event') $ event')
+_multiplexSend outgoing chan = do
+    msg <- readTBQueue $ zcOut chan
+    event <- toEvent chan msg
+    writeTBQueue outgoing (traceShow ("multisend", event) $ event)
 
 _channelSend :: (Sender t, Packable a, Show a) => TBQueue (Event a) -> Socket z t -> ZMQ z ()
 _channelSend outgoing sock = do
@@ -122,26 +119,68 @@ recvPoll sock chans = Sock sock [Z.In] (Just callback)
         callback [Z.In] = channelRecv chans sock
         callback _ = return ()
 
-send :: (Show a) => ZChannels a -> Event a -> IO (Created (ZChan a))
-send zchans event = do
-    event' <- ensureMsgId $ ensureVersion3 event
-    zchan <- atomically $ do
-        chans <- readTVar $ zcsChans zchans
-        zchan <- getZChan zchans event
-        writeTBQueue (zcOut $ raw zchan) (traceShow ("send", event') $ event')
-        return zchan
-    case zchan of
-        New chan -> do
-            forkIO $ forever $ atomically $ _multiplexSend (zcsOut zchans) chan
-            return ()
-        Existing chan -> return ()
-    return zchan
+nextMsgId :: ZChan a -> STM ByteString
+nextMsgId chan = do
+    gen <- readTVar (zcGen chan)
+    let (uuid, gen') = random gen
+    writeTVar (zcGen chan) gen'
+    return $ toASCIIBytes uuid
 
-newZChannels = ZChannels <$> newTBQueue bufferSize <*> newTBQueue bufferSize <*> newTVar []
+getResponseTo :: ZChan a -> ByteString -> STM (Maybe ByteString)
+getResponseTo chan msgId = do
+    chanId <- readTVar $ zcId chan
+    when (isNothing chanId) $ writeTVar (zcId chan) (Just msgId)
+    return chanId
+
+toEvent :: ZChan a -> Message a -> STM (Event a)
+toEvent chan (Msg headers name value) = do
+    msgId <- nextMsgId chan
+    responseTo <- getResponseTo chan msgId
+    return $ Event msgId 3 responseTo headers name value
+
+toMsg :: ZChan a -> Event a -> STM (Message a)
+toMsg chan event = do
+    getResponseTo chan (eMsgId event)
+    return $ Msg (eHeaders event) (eName event) (eArgs event)
+
+mkGen :: ZChannels a -> STM StdGen
+mkGen zchans = do
+    baseGen <- readTVar $ zcsGen zchans
+    let (baseGen', newGen) = split baseGen
+    writeTVar (zcsGen zchans) baseGen
+    return newGen
+
+addChan :: ZChannels a -> ZChan a -> STM ()
+addChan zchans chan = do
+    modifyTVar' (zcsChans zchans) (chan:)
+    writeTBQueue (zcsNewChans zchans) chan
+
+mkChannel :: ZChannels a -> STM (ZChan a)
+mkChannel zchans = do
+    gen <- mkGen zchans
+    chan <- ZChan <$> (newTBQueue bufferSize) <*> (newTBQueue bufferSize) <*> (newTVar Nothing) <*> (newTVar gen)
+    addChan zchans chan
+    return chan
+
+mkZChannels :: IO (ZChannels a)
+mkZChannels = ZChannels
+    <$> newTBQueueIO bufferSize
+    <*> newTBQueueIO bufferSize
+    <*> newTVarIO []
+    <*> (newStdGen >>= newTVarIO)
+    <*> newTBQueueIO bufferSize
+
+setupNewChannel zchans = do
+    chan <- atomically $ readTBQueue $ zcsNewChans zchans
+    forkIO $ forever $ atomically $ _multiplexSend (zcsOut zchans) chan
+
+send :: ZChan a -> Message a -> STM ()
+send chan msg = writeTBQueue (zcOut chan) msg
 
 setupZChannels :: (Receiver t, Sender t, Unpackable a, Packable a, Show a) => (forall z. ZMQ z (Socket z t)) -> IO (ZChannels a)
 setupZChannels mkSock = do
-    zchans <- atomically newZChannels
+    zchans <- mkZChannels
+    forkIO $ forever $ setupNewChannel zchans
     forkIO $ forever $ multiplexRecv zchans
     forkIO $ runZMQ $ do
         sock <- mkSock
