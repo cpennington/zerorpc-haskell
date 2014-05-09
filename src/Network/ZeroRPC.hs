@@ -9,7 +9,7 @@ import "mtl" Control.Monad.Trans (lift)
 import Control.Applicative ((<$>), (<*>))
 import Control.Concurrent (forkIO)
 import Control.Concurrent.STM (atomically)
-import Control.Concurrent.STM.TBQueue (readTBQueue, TBQueue)
+import Control.Concurrent.STM.TBQueue (readTBQueue, TBQueue, tryReadTBQueue)
 import Control.Monad (forever)
 import Data.MessagePack (pack, unpack, toObject, Object(..), OBJECT, Packable, from, Unpackable(..))
 import Data.Text (Text)
@@ -31,6 +31,12 @@ ping serverName = return ("pong", serverName)
 inspect :: Message Object
 inspect = Msg [] "_zerorpc_inspect" (ObjectArray [])
 
+sendAndPrint :: ZChannels Object -> Message Object -> IO ()
+sendAndPrint zchans msg = do
+    zchan <- atomically $ mkChannel zchans
+    atomically $ send zchan msg
+    forever $ printChannel $ zcIn zchan
+
 testInspect :: IO ()
 testInspect = do
     let mkSock = do
@@ -38,10 +44,7 @@ testInspect = do
             connect req "tcp://127.0.0.1:1234"
             return req
     zchans <- setupZChannels mkSock
-    zchan <- atomically $ mkChannel zchans
-    atomically $ send zchan inspect
-
-    printChannel $ zcIn zchan
+    sendAndPrint zchans inspect
 
 printChannel :: TBQueue (Message Object) -> IO ()
 printChannel queue = do

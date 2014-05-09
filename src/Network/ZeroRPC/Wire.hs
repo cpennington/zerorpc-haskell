@@ -26,7 +26,7 @@ versionKey = toObject ("v" :: String)
 replyToKey :: Object
 replyToKey = toObject ("response_to" :: String)
 
-instance (Packable a) => Packable (Event a) where
+instance Packable Event where
     from event = from (ObjectMap hs, n, v)
         where
             hs = maybeToList replyTo ++ msgId:version:(strip [msgIdKey, versionKey] $ eHeaders event)
@@ -36,7 +36,7 @@ instance (Packable a) => Packable (Event a) where
             n = eName event
             v = eArgs event
 
-instance (Unpackable a) => Unpackable (Event a) where
+instance Unpackable Event where
     get = do
         (ObjectMap headers, name, args) <- get
         let msgId = lookup msgIdKey headers
@@ -60,10 +60,10 @@ strip keys = filter (\(k, v) -> k `elem` keys)
 key .= value = (toObject key, toObject value)
 {-# INLINE (.=) #-}
 
-sendEvent :: (Sender t, Packable a) => Socket z t -> Event a -> ZMQ z ()
+sendEvent :: (Sender t) => Socket z t -> Event -> ZMQ z ()
 sendEvent sock event = send sock [] $ toStrict $ pack event
 
-recvEvent :: (Receiver t, Unpackable a) => Socket z t -> ZMQ z (Event a)
+recvEvent :: (Receiver t) => Socket z t -> ZMQ z Event
 recvEvent sock = do
     result <- receive sock
     return $ unpack result
