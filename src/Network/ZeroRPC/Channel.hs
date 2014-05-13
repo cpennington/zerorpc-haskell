@@ -8,7 +8,7 @@ import Control.Applicative ((<$>), (<*>), pure)
 import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.STM (atomically, STM)
 import Control.Concurrent.STM (isEmptyTBQueue, isFullTBQueue, newTBQueue, newTBQueueIO, readTBQueue, writeTBQueue, TBQueue)
-import Control.Concurrent.STM (readTVar, writeTVar, newTVarIO, newTVar, TVar, modifyTVar')
+import Control.Concurrent.STM (readTVar, writeTVar, newTVarIO, newTVar, TVar, modifyTVar', newEmptyTMVarIO)
 import Control.Exception (throw)
 import Control.Monad (forever, void, when, liftM, filterM)
 import Data.ByteString (ByteString)
@@ -106,10 +106,15 @@ nextMsgId chan = do
     writeTVar (zcGen chan) gen'
     return $ toASCIIBytes uuid
 
+setChanId :: ZChan -> ByteString -> STM ()
+setChanId chan msgId = do
+    chanId <- readTVar $ zcId chan
+    when (isNothing chanId) $ writeTVar (zcId chan) (Just msgId)
+
 getResponseTo :: ZChan -> ByteString -> STM (Maybe ByteString)
 getResponseTo chan msgId = do
     chanId <- readTVar $ zcId chan
-    when (isNothing chanId) $ writeTVar (zcId chan) (Just msgId)
+    setChanId chan msgId
     return chanId
 
 _toEvent :: ZChan -> [Header] -> Name -> Object -> STM Event
@@ -125,8 +130,11 @@ toEvent chan (Call name value) = _toEvent chan [] name $ toObject value
 
 toMsg :: ZChan -> Event -> STM (Message)
 toMsg chan event = do
-    getResponseTo chan (eMsgId event)
-    return $ Call (eName event) $ fromObject $ eArgs event
+    -- This initializes the ZChan with the appropriate channel id
+    setChanId chan (eMsgId event)
+    case eName event of
+        "OK" -> return $ OK $ fromObject $ eArgs event
+        otherwise -> return $ Call (eName event) $ fromObject $ eArgs event
 
 mkGen :: ZChannels -> STM StdGen
 mkGen zchans = do
@@ -170,7 +178,8 @@ sendHeartbeat chan = do
 send :: ZChan -> Message -> STM ()
 send chan msg = writeTBQueue (zcOut chan) msg
 
-recv = undefined
+recv :: ZChan -> STM Message
+recv chan = readTBQueue (zcIn chan)
 
 setupZChannels :: (Receiver t, Sender t) => (forall z. ZMQ z (Socket z t)) -> IO ZChannels
 setupZChannels mkSock = do
