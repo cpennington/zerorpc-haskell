@@ -2,29 +2,27 @@
 
 module Network.ZeroRPC.Wire where
 
-import qualified "mtl" Control.Monad.State.Lazy as S
 import Data.MessagePack (Object(ObjectMap), OBJECT, Packable, Unpackable(get))
 import Data.MessagePack (pack, unpack, toObject, from, fromObject)
-import System.ZMQ4.Monadic (Req(..), Receiver, Socket, ZMQ, Sender)
-import System.ZMQ4.Monadic (runZMQ, socket, connect, send, receive, liftIO)
-import Data.UUID.V4 (nextRandom)
-import Data.Maybe (Maybe(..), listToMaybe, maybeToList, isNothing, fromJust)
+import System.ZMQ4.Monadic (Receiver, Socket, ZMQ, Sender)
+import System.ZMQ4.Monadic (send, receive)
+import Data.Maybe (maybeToList, isNothing, fromJust)
 import Data.ByteString (ByteString)
 import Control.Monad (when)
-import Control.Monad.IO.Class (MonadIO)
 import Data.ByteString.Lazy (toStrict)
-import "mtl" Control.Monad.Trans (lift)
+import Data.Text (Text)
 
-import Network.ZeroRPC.Types (Header(..), Event(..), Name(..), Message(..))
+type Header = (Object, Object)
+type Name = Text
 
-msgIdKey :: Object
-msgIdKey = toObject ("message_id" :: String)
-
-versionKey :: Object
-versionKey = toObject ("v" :: String)
-
-replyToKey :: Object
-replyToKey = toObject ("response_to" :: String)
+data Event = Event {
+    eMsgId :: !ByteString
+  , eVersion :: !Int
+  , eResponseTo :: !(Maybe ByteString)
+  , eHeaders :: ![Header]
+  , eName :: !Name
+  , eArgs :: !Object
+} deriving Show
 
 instance Packable Event where
     from event = from (ObjectMap hs, n, v)
@@ -53,8 +51,17 @@ instance Unpackable Event where
           , eArgs = args
         }
 
+msgIdKey :: Object
+msgIdKey = toObject ("message_id" :: String)
+
+versionKey :: Object
+versionKey = toObject ("v" :: String)
+
+replyToKey :: Object
+replyToKey = toObject ("response_to" :: String)
+
 strip :: [Object] -> [Header] -> [Header]
-strip keys = filter (\(k, v) -> k `elem` keys)
+strip keys = filter ((flip elem keys) . fst)
 
 (.=) :: (OBJECT k, OBJECT v) => k -> v -> Header
 key .= value = (toObject key, toObject value)

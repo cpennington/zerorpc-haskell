@@ -21,13 +21,38 @@ import qualified System.ZMQ4.Monadic as Z
 import "mtl" Control.Monad.Trans (lift)
 import System.Random (StdGen, Random(..), split, newStdGen)
 import Data.UUID (toASCIIBytes)
+import Data.Text (Text)
 
-import Network.ZeroRPC.Types (Event(..), Message(..), Header, Name, ZChannels(..), ZChan(..))
-import Network.ZeroRPC.Wire (msgIdKey, (.=), sendEvent, recvEvent, replyToKey)
+import Network.ZeroRPC.Wire (Event(..), Header, Name, msgIdKey, (.=), sendEvent, recvEvent, replyToKey)
 
 import Control.Exception (Exception)
 import Control.Concurrent.STM (throwSTM, catchSTM, tryPeekTBQueue)
 import Debug.Trace
+
+data Message = Call !Name !Object
+             | Heartbeat
+             | More !Int
+             | Stream !Object
+             | StreamDone
+             | Inspect
+             | OK !Object
+             | Err !Name !Text !Text  -- (error name, error message, traceback)
+    deriving Show
+
+data ZChan = ZChan {
+    zcOut :: TBQueue (Message)
+  , zcIn :: TBQueue (Message)
+  , zcId :: TVar (Maybe ByteString)
+  , zcGen :: TVar StdGen
+}
+
+data ZChannels = ZChannels {
+    zcsIn :: TBQueue Event
+  , zcsOut :: TBQueue Event
+  , zcsChans :: TVar [ZChan]
+  , zcsGen :: TVar StdGen
+  , zcsNewChans :: TBQueue ZChan
+}
 
 ensureReplyTo :: ZChan -> Event -> STM Event
 ensureReplyTo chan event = do
