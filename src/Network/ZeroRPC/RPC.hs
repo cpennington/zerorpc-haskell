@@ -10,19 +10,19 @@ import qualified System.ZMQ4.Monadic as Z
 import "mtl" Control.Monad.Trans (lift)
 
 import Network.ZeroRPC.Channel (send, recv, mkChannel, setupZChannels)
-import Network.ZeroRPC.Types (Message(..), Client(..), Name)
+import Network.ZeroRPC.Types (Message(..), Client(..), Name, ARGS(..))
 
-_reqSingle :: (OBJECT a) => Client -> Message -> IO a
+_reqSingle :: (ARGS a) => Client -> Message -> IO a
 _reqSingle client msg = do
     zchan <- atomically $ mkChannel $ clChans client
     atomically $ send zchan msg
     resp <- atomically $ recv zchan
     case resp of
-        OK value -> return $ fromObject value
+        OK value -> return $ fromArgs value
         otherwise -> fail $ show resp
 
-call :: (OBJECT a, OBJECT b) => Client -> Name -> a -> IO b
-call client fn args = _reqSingle client (Call fn $ toObject args)
+call :: (ARGS a, ARGS b) => Client -> Name -> a -> IO b
+call client fn args = _reqSingle client (Call fn $ toArgs args)
 
 inspect :: Client -> IO Object
 inspect = flip _reqSingle Inspect

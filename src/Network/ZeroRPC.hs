@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE PackageImports #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 module Network.ZeroRPC where
 
@@ -18,7 +19,7 @@ import System.ZMQ4.Monadic (runZMQ, socket, Req(..), liftIO, Receiver, Socket, Z
 import Text.Show.Pretty (ppShow)
 
 import Network.ZeroRPC.Types (Header(..), Event(..), Name(..), Message(..))
-import Network.ZeroRPC.RPC (mkClient, inspect, connect)
+import Network.ZeroRPC.RPC (mkClient, inspect, connect, call)
 
 import Control.Concurrent.STM.TBQueue (tryPeekTBQueue)
 import Control.Concurrent.STM.TVar (readTVar)
@@ -29,7 +30,7 @@ testInspect :: IO ()
 testInspect = do
     client <- mkClient $ do
         connect "tcp://127.0.0.1:1234"
-    resp <- inspect client
+    (resp :: Double) <- call client "time" ()
     liftIO $ putStrLn $ ppShow resp
 
 main :: IO ()
