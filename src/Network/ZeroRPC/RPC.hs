@@ -6,18 +6,20 @@
 module Network.ZeroRPC.RPC where
 
 import Control.Concurrent.STM (atomically)
-import Data.MessagePack (OBJECT(..), fromObject, toObject, Object(..))
+import Data.MessagePack (OBJECT(..), fromObject, toObject, Object(..), Packable(..), Unpackable(..))
 import Control.Monad.Reader (runReaderT, ReaderT, ask)
 import qualified System.ZMQ4.Monadic as Z
 import "mtl" Control.Monad.Trans (lift)
 
 import Control.Exception (throw)
 import Control.Applicative ((<$>), (<*>), pure)
+import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Lazy as TL
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as BL
 import Data.MessagePack.Unpack (UnpackError(..))
+import Data.MessagePack.Assoc (Assoc(..))
 
 import Network.ZeroRPC.Channel (send, recv, mkChannel, setupZChannels, ZChannels(..), Message(..))
 import Network.ZeroRPC.Wire (Name)
@@ -63,6 +65,38 @@ instance (OBJECT a1, OBJECT a2) =>  ARGS (a1, a2) where
     toArgs (a1, a2) = ObjectArray [toObject a1, toObject a2]
     tryFromArgs (ObjectArray [o1, o2]) = (,) <$> tryFromObject o1 <*> tryFromObject o2
 
+data FunctionSpec = FunctionSpec Name Text Object
+    deriving Show
+
+data ObjectSpec = ObjectSpec Name [FunctionSpec]
+    deriving Show
+
+instance Packable ObjectSpec where
+    from (ObjectSpec name methods) = from $ Assoc [
+        ("name", toObject name)
+      , ("methods", ObjectMap $ map fnTuple methods)
+      ]
+        where
+            fnTuple (FunctionSpec name doc argspec) = (toObject name, ObjectMap [(toObject "doc", toObject doc), (toObject "args", argspec)])
+
+instance Unpackable ObjectSpec where
+    get = do
+        Assoc vs <- get
+        let name = lookup "name" vs
+            methods = lookup "methods" vs
+        case (name, methods) of
+            (Just name, Just methods) -> return $ ObjectSpec (fromObject name) (map parseFunctionSpec $ fromObject methods)
+            (Just _, _) -> fail "missing required 'name' key"
+            (_, Just _) -> fail "missing required 'methods' key"
+            otherwise -> fail "missing required 'name' and 'methods' keys"
+        where
+            parseFunctionSpec (name, spec) =
+                case (lookup "doc" spec, lookup "args" spec) of
+                    (Just doc, Just argspec) -> FunctionSpec name (fromObject doc) argspec
+
+instance OBJECT ObjectSpec
+instance ARGS ObjectSpec
+
 _reqSingle :: (ARGS a) => Client -> Message -> IO a
 _reqSingle client msg = do
     zchan <- atomically $ mkChannel $ clChans client
@@ -75,7 +109,7 @@ _reqSingle client msg = do
 call :: (ARGS a, ARGS b) => Client -> Name -> a -> IO b
 call client fn args = _reqSingle client (Call fn $ toArgs args)
 
-inspect :: Client -> IO Object
+inspect :: Client -> IO ObjectSpec
 inspect = flip _reqSingle Inspect
 
 mkClient :: (forall z. ReaderT (Z.Socket z Z.Req) (Z.ZMQ z) ()) -> IO Client

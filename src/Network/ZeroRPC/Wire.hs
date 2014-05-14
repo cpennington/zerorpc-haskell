@@ -22,7 +22,7 @@ data Event = Event {
   , eHeaders :: ![Header]
   , eName :: !Name
   , eArgs :: !Object
-} deriving Show
+} deriving (Show, Eq)
 
 instance Packable Event where
     from event = from (ObjectMap hs, n, v)
@@ -51,6 +51,8 @@ instance Unpackable Event where
           , eArgs = args
         }
 
+instance OBJECT Event
+
 msgIdKey :: Object
 msgIdKey = toObject ("message_id" :: String)
 
@@ -61,7 +63,7 @@ replyToKey :: Object
 replyToKey = toObject ("response_to" :: String)
 
 strip :: [Object] -> [Header] -> [Header]
-strip keys = filter ((flip elem keys) . fst)
+strip keys = filter (not . (flip elem keys) . fst)
 
 (.=) :: (OBJECT k, OBJECT v) => k -> v -> Header
 key .= value = (toObject key, toObject value)
