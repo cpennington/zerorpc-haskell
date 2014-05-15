@@ -66,10 +66,10 @@ instance (OBJECT a1, OBJECT a2) =>  ARGS (a1, a2) where
     tryFromArgs (ObjectArray [o1, o2]) = (,) <$> tryFromObject o1 <*> tryFromObject o2
 
 data FunctionSpec = FunctionSpec Name Text Object
-    deriving Show
+    deriving (Show, Eq)
 
 data ObjectSpec = ObjectSpec Name [FunctionSpec]
-    deriving Show
+    deriving (Show, Eq)
 
 instance Packable ObjectSpec where
     from (ObjectSpec name methods) = from $ Assoc [
@@ -85,14 +85,15 @@ instance Unpackable ObjectSpec where
         let name = lookup "name" vs
             methods = lookup "methods" vs
         case (name, methods) of
-            (Just name, Just methods) -> return $ ObjectSpec (fromObject name) (map parseFunctionSpec $ fromObject methods)
+            (Just name, Just (ObjectMap methods)) -> return $ ObjectSpec (fromObject name) (map parseFunctionSpec methods)
             (Just _, _) -> fail "missing required 'name' key"
             (_, Just _) -> fail "missing required 'methods' key"
             otherwise -> fail "missing required 'name' and 'methods' keys"
         where
             parseFunctionSpec (name, spec) =
-                case (lookup "doc" spec, lookup "args" spec) of
-                    (Just doc, Just argspec) -> FunctionSpec name (fromObject doc) argspec
+                case (lookup "doc" specs, lookup "args" specs) of
+                    (Just doc, Just argspec) -> FunctionSpec (fromObject name) (fromObject doc) argspec
+                where (Assoc specs) = fromObject spec
 
 instance OBJECT ObjectSpec
 instance ARGS ObjectSpec
