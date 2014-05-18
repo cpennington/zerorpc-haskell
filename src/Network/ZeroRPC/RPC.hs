@@ -10,6 +10,9 @@ import Data.MessagePack (OBJECT(..), fromObject, toObject, Object(..), Packable(
 import Control.Monad.Reader (runReaderT, ReaderT, ask)
 import qualified System.ZMQ4.Monadic as Z
 import "mtl" Control.Monad.Trans (lift)
+import Control.Concurrent (forkIO)
+import Control.Monad (forever, void)
+import Data.List (find)
 
 import Control.Exception (throw)
 import Control.Applicative ((<$>), (<*>), pure)
@@ -21,12 +24,25 @@ import qualified Data.ByteString.Lazy as BL
 import Data.MessagePack.Unpack (UnpackError(..))
 import Data.MessagePack.Assoc (Assoc(..))
 
-import Network.ZeroRPC.Channel (send, recv, mkChannel, setupZChannels, ZChannels(..), Message(..))
+import Network.ZeroRPC.Channel (send, recv, addNewChannel, setupZChannels, ZChannels(..), Message(..), Callback(..), ZChan(..))
 import Network.ZeroRPC.Wire (Name)
 
 data Client = Client {
     clChans :: !ZChannels
 }
+
+data Server = Server {
+    srvChans :: !ZChannels
+  , srvMethods :: [Method]
+}
+
+data Method = Method {
+    mName :: Name,
+    mDoc :: Text,
+    mCall :: Call
+}
+
+type Call = Object -> IO Object
 
 -- | This class encodes arguments and return values into MessagePack tuples
 class OBJECT a => ARGS a where
@@ -61,9 +77,7 @@ instance ARGS () where
     tryFromArgs (ObjectArray []) = Right ()
     tryFromArgs _ = tryFromArgsError
 
-instance (OBJECT a1, OBJECT a2) =>  ARGS (a1, a2) where
-    toArgs (a1, a2) = ObjectArray [toObject a1, toObject a2]
-    tryFromArgs (ObjectArray [o1, o2]) = (,) <$> tryFromObject o1 <*> tryFromObject o2
+instance (OBJECT a1, OBJECT a2) =>  ARGS (a1, a2)
 
 data FunctionSpec = FunctionSpec Name Text Object
     deriving (Show, Eq)
@@ -98,9 +112,34 @@ instance Unpackable ObjectSpec where
 instance OBJECT ObjectSpec
 instance ARGS ObjectSpec
 
+
+class Servable a where
+    serve :: a -> Call
+
+serveConst :: (ARGS a) => a -> Call
+serveConst x = const $ (return $ toArgs x :: IO Object)
+
+instance (OBJECT a, ARGS b) => Servable (a -> IO b) where
+    serve f x = (f $ fromObject x) >>= (return . toArgs)
+
+instance (OBJECT a, Servable b) => Servable (a -> b) where
+    serve f x = (serve f) x
+
+instance Servable Bool where serve = serveConst
+instance Servable Double where serve = serveConst
+instance Servable Float where serve = serveConst
+instance Servable Int where serve = serveConst
+instance Servable String where serve = serveConst
+instance Servable B.ByteString where serve = serveConst
+instance Servable BL.ByteString where serve = serveConst
+instance Servable T.Text where serve = serveConst
+instance Servable TL.Text where serve = serveConst
+instance Servable Object where serve = serveConst
+instance (OBJECT a, OBJECT b) => Servable (a, b) where serve = serveConst
+
 _reqSingle :: (ARGS a) => Client -> Message -> IO a
 _reqSingle client msg = do
-    zchan <- atomically $ mkChannel $ clChans client
+    zchan <- atomically $ addNewChannel $ clChans client
     atomically $ send zchan msg
     resp <- atomically $ recv zchan
     case resp of
@@ -119,9 +158,40 @@ mkClient confSock = do
             req <- Z.socket Z.Req
             runReaderT confSock req
             return req
-    zchans <- setupZChannels mkSock
+    zchans <- setupZChannels mkSock Nothing
     return $ Client zchans
 
-connect s = do
-    sock <- ask
-    lift $ Z.connect sock s
+mkCallback :: [Method] -> ZChan -> IO ()
+mkCallback methods zchan = void $ forkIO $ forever $ do
+    runMethod <- atomically $ do
+        msg <- recv zchan
+        case msg of
+            Call name args ->
+                case find ((== name) . mName) methods of
+                    Just method -> return $ (mCall method) args
+                    Nothing -> fail $ show msg
+            otherwise -> fail $ show msg
+    result <- runMethod
+    atomically $ send zchan $ OK result
+
+mkServer :: Name -> [Method] -> (forall z. ReaderT (Z.Socket z Z.Rep) (Z.ZMQ z) ()) -> IO Server
+mkServer  name methods confSock = do
+    let mkSock = do
+            req <- Z.socket Z.Rep
+            runReaderT confSock req
+            return req
+        ping = method (T.pack "_zerorpc_ping") (T.pack "Return pong") ("pong", name)
+    zchans <- setupZChannels mkSock $ Just $ mkCallback $ ping:methods
+
+    return $ Server zchans methods
+
+method :: Servable a => Name -> Text -> a -> Method
+method name doc f = Method name doc (serve f)
+
+withSock f = ask >>= lift . f
+
+connect :: String -> (forall z. ReaderT (Z.Socket z s) (Z.ZMQ z) ())
+connect = withSock . flip Z.connect
+
+bind :: String -> (forall z. ReaderT (Z.Socket z s) (Z.ZMQ z) ())
+bind = withSock . flip Z.bind

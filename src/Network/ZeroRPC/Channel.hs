@@ -29,6 +29,8 @@ import Control.Exception (Exception)
 import Control.Concurrent.STM (throwSTM, catchSTM, tryPeekTBQueue)
 import Debug.Trace
 
+type Callback = Maybe (ZChan -> IO ())
+
 data Message = Call !Name !Object
              | Heartbeat
              | More !Int
@@ -37,7 +39,7 @@ data Message = Call !Name !Object
              | Inspect
              | OK !Object
              | Err !Name !Text !Text  -- (error name, error message, traceback)
-    deriving Show
+    deriving (Show, Eq)
 
 data ZChan = ZChan {
     zcOut :: TBQueue (Message)
@@ -52,6 +54,7 @@ data ZChannels = ZChannels {
   , zcsChans :: TVar [ZChan]
   , zcsGen :: TVar StdGen
   , zcsNewChans :: TBQueue ZChan
+  , zcsCallback :: Callback
 }
 
 ensureReplyTo :: ZChan -> Event -> STM Event
@@ -82,7 +85,7 @@ multiplexRecv zchans = atomically $ do
     event <- readTBQueue incoming
     maybeChan <- getZChan zchans event
     chan <- case maybeChan of
-        Nothing -> mkChannel zchans
+        Nothing -> addNewChannel zchans
         Just chan -> return chan
     msg <- toMsg chan event
     writeTBQueue (zcIn chan) (traceShow ("multirecv", msg) $ msg)
@@ -148,18 +151,39 @@ _toEvent chan headers name value = do
     responseTo <- getResponseTo chan msgId
     return $ Event msgId 3 responseTo headers name value
 
+
 toEvent :: ZChan -> Message -> STM Event
-toEvent chan Heartbeat = _toEvent chan [] "_zpc_hb" $ ObjectArray []
-toEvent chan Inspect = _toEvent chan [] "_zerorpc_inspect" $ ObjectArray []
-toEvent chan (Call name value) = _toEvent chan [] name $ toObject value
+toEvent chan msg =
+    case msg of
+        Heartbeat -> empty "_zpc_hb"
+        Inspect -> empty "_zerorpc_inspect"
+        (Call name value) -> val name value
+        (More count) -> val "_zpc_more" count
+        (Stream value) -> val "STREAM" value
+        StreamDone -> empty "STREAM_DONE"
+        (OK value) -> val "OK" value
+        (Err name err trace) -> val "ERR" (name, err, trace)
+    where
+        val name value = _toEvent chan [] name $ toObject value
+        empty name = _toEvent chan [] name $ ObjectArray []
 
 toMsg :: ZChan -> Event -> STM (Message)
 toMsg chan event = do
     -- This initializes the ZChan with the appropriate channel id
     setChanId chan (eMsgId event)
+    let val cons = return $ cons $ fromObject $ eArgs event
+        empty cons = return cons
     case eName event of
-        "OK" -> return $ OK $ fromObject $ eArgs event
-        otherwise -> return $ Call (eName event) $ fromObject $ eArgs event
+        "OK" -> val OK
+        "_zpc_hb" -> empty Heartbeat
+        "_zerorpc_inspect" -> empty Inspect
+        "_zpc_more" -> val More
+        "STREAM" -> val Stream
+        "STREAM_DONE" -> empty StreamDone
+        "ERR" -> do
+            let (name, err, trace) = fromObject $ eArgs event
+            return $ Err name err trace
+        otherwise -> val $ Call (eName event)
 
 mkGen :: ZChannels -> STM StdGen
 mkGen zchans = do
@@ -173,23 +197,30 @@ addChan zchans chan = do
     modifyTVar' (zcsChans zchans) (chan:)
     writeTBQueue (zcsNewChans zchans) chan
 
-mkChannel :: ZChannels -> STM ZChan
-mkChannel zchans = do
+mkChannel :: StdGen -> STM ZChan
+mkChannel gen = ZChan <$> (newTBQueue bufferSize) <*> (newTBQueue bufferSize) <*> (newTVar Nothing) <*> (newTVar gen)
+
+addNewChannel :: ZChannels -> STM ZChan
+addNewChannel zchans = do
     gen <- mkGen zchans
-    chan <- ZChan <$> (newTBQueue bufferSize) <*> (newTBQueue bufferSize) <*> (newTVar Nothing) <*> (newTVar gen)
+    chan <- mkChannel gen
     addChan zchans chan
     return chan
 
-mkZChannels :: IO ZChannels
-mkZChannels = ZChannels
+mkZChannels :: Callback -> IO ZChannels
+mkZChannels callback = ZChannels
     <$> newTBQueueIO bufferSize
     <*> newTBQueueIO bufferSize
     <*> newTVarIO []
     <*> (newStdGen >>= newTVarIO)
     <*> newTBQueueIO bufferSize
+    <*> pure callback
 
 setupNewChannel zchans = do
     chan <- atomically $ readTBQueue $ zcsNewChans zchans
+    case zcsCallback zchans of
+        Nothing -> return ()
+        Just callback -> callback chan
     forkIO $ forever $ atomically $ _multiplexSend (zcsOut zchans) chan
     forkIO $ forever $ sendHeartbeat chan
 
@@ -206,9 +237,9 @@ send chan msg = writeTBQueue (zcOut chan) msg
 recv :: ZChan -> STM Message
 recv chan = readTBQueue (zcIn chan)
 
-setupZChannels :: (Receiver t, Sender t) => (forall z. ZMQ z (Socket z t)) -> IO ZChannels
-setupZChannels mkSock = do
-    zchans <- mkZChannels
+setupZChannels :: (Receiver t, Sender t) => (forall z. ZMQ z (Socket z t)) -> Callback -> IO ZChannels
+setupZChannels mkSock callback = do
+    zchans <- mkZChannels callback
     forkIO $ forever $ setupNewChannel zchans
     forkIO $ forever $ multiplexRecv zchans
     forkIO $ runZMQ $ do

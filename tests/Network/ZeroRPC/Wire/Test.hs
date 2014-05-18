@@ -1,7 +1,7 @@
 module Network.ZeroRPC.Wire.Test where
 
 import Test.Tasty (testGroup)
-import qualified Test.Tasty.QuickCheck as QC
+import Test.Tasty.QuickCheck (arbitrary, Arbitrary, oneof, (===), Gen, choose, vectorOf, sample, testProperty, sized, Property)
 import Data.MessagePack.Object (fromObject, toObject, Object(..))
 import Data.MessagePack.Pack (pack)
 import Data.MessagePack.Unpack (unpack)
@@ -11,39 +11,39 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.Text as T
 
-instance QC.Arbitrary B.ByteString where
-    arbitrary = BC.pack <$> QC.arbitrary
+instance Arbitrary B.ByteString where
+    arbitrary = BC.pack <$> arbitrary
 
-instance QC.Arbitrary T.Text where
-    arbitrary = T.pack <$> QC.arbitrary
+instance Arbitrary T.Text where
+    arbitrary = T.pack <$> arbitrary
 
-instance QC.Arbitrary Event where
+instance Arbitrary Event where
     arbitrary = Event
-        <$> QC.arbitrary
-        <*> QC.arbitrary
-        <*> QC.arbitrary
-        <*> QC.arbitrary
-        <*> QC.arbitrary
-        <*> QC.arbitrary
+        <$> arbitrary
+        <*> arbitrary
+        <*> arbitrary
+        <*> arbitrary
+        <*> arbitrary
+        <*> arbitrary
 
-instance QC.Arbitrary Object where
-  arbitrary = QC.sized sizedArbObject
+instance Arbitrary Object where
+  arbitrary = sized sizedArbObject
 
-arbObjLiteral = QC.oneof [
+arbObjLiteral = oneof [
       return ObjectNil
-    , ObjectBool <$> QC.arbitrary
-    , ObjectInteger <$> QC.arbitrary
-    , ObjectFloat <$> QC.arbitrary
-    , ObjectDouble <$> QC.arbitrary
-    , (ObjectRAW . B.pack) <$> QC.arbitrary
+    , ObjectBool <$> arbitrary
+    , ObjectInteger <$> arbitrary
+    , ObjectFloat <$> arbitrary
+    , ObjectDouble <$> arbitrary
+    , (ObjectRAW . B.pack) <$> arbitrary
     , return $ ObjectArray []
     , return $ ObjectMap []
     ]
 
 
-sizedArbObject :: Int -> QC.Gen Object
+sizedArbObject :: Int -> Gen Object
 sizedArbObject 0 = arbObjLiteral
-sizedArbObject n = QC.oneof [
+sizedArbObject n = oneof [
       arbObjLiteral
     , ObjectArray <$> smallListOf subobject
     , ObjectMap <$> smallListOf ((,) <$> arbObjLiteral <*> subobject)
@@ -51,18 +51,18 @@ sizedArbObject n = QC.oneof [
     where
       subobject = sizedArbObject $ n `div` 5
       smallListOf g = do
-        size <- QC.choose (0, 10)
-        QC.vectorOf size g
+        size <- choose (0, 10)
+        vectorOf size g
 
-printSamples = QC.sample (QC.arbitrary :: QC.Gen Object)
+printSamples = sample (arbitrary :: Gen Object)
 
-prop_ObjectRoundtrip :: Event -> Bool
-prop_ObjectRoundtrip e = e == (fromObject $ toObject e)
+prop_ObjectRoundtrip :: Event -> Property
+prop_ObjectRoundtrip e = e === (fromObject $ toObject e)
 
-prop_BytestringRoundtrip :: Event -> Bool
-prop_BytestringRoundtrip e = e == (unpack $ pack e)
+prop_BytestringRoundtrip :: Event -> Property
+prop_BytestringRoundtrip e = e === (unpack $ pack e)
 
 qcProps = testGroup "(checked by QuickCheck)" [
-    QC.testProperty "fromObject . toObject == id" prop_BytestringRoundtrip,
-    QC.testProperty "unpack . pack == id" prop_ObjectRoundtrip
+    testProperty "fromObject . toObject == id" prop_BytestringRoundtrip,
+    testProperty "unpack . pack == id" prop_ObjectRoundtrip
     ]

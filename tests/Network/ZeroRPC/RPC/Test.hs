@@ -1,30 +1,27 @@
 module Network.ZeroRPC.RPC.Test where
 
 import Test.Tasty (testGroup)
-import qualified Test.Tasty.QuickCheck as QC
+import Test.Tasty.QuickCheck (Arbitrary, arbitrary, testProperty, (===), Property)
 import Data.MessagePack.Object (fromObject, toObject, Object(..))
 import Data.MessagePack.Pack (pack)
 import Data.MessagePack.Unpack (unpack)
 import Control.Applicative ((<*>), (<$>))
 import Network.ZeroRPC.RPC (ObjectSpec(..), FunctionSpec(..))
 import qualified Network.ZeroRPC.Wire.Test as WT
-import qualified Data.ByteString as B
-import qualified Data.ByteString.Char8 as BC
-import qualified Data.Text as T
 
-instance QC.Arbitrary ObjectSpec where
-    arbitrary = ObjectSpec <$> QC.arbitrary <*> QC.arbitrary
+instance Arbitrary ObjectSpec where
+    arbitrary = ObjectSpec <$> arbitrary <*> arbitrary
 
-instance QC.Arbitrary FunctionSpec where
-    arbitrary = FunctionSpec <$> QC.arbitrary <*> QC.arbitrary <*> QC.arbitrary
+instance Arbitrary FunctionSpec where
+    arbitrary = FunctionSpec <$> arbitrary <*> arbitrary <*> arbitrary
 
-prop_ObjectRoundtrip :: ObjectSpec -> Bool
-prop_ObjectRoundtrip os = os == (fromObject $ toObject os)
+prop_ObjectRoundtrip :: ObjectSpec -> Property
+prop_ObjectRoundtrip os = os === (fromObject $ toObject os)
 
-prop_BytestringRoundtrip :: ObjectSpec -> Bool
-prop_BytestringRoundtrip os = os == (unpack $ pack os)
+prop_BytestringRoundtrip :: ObjectSpec -> Property
+prop_BytestringRoundtrip os = os === (unpack $ pack os)
 
 qcProps = testGroup "(checked by QuickCheck)" [
-    QC.testProperty "fromObject . toObject == id" prop_BytestringRoundtrip,
-    QC.testProperty "unpack . pack == id" prop_ObjectRoundtrip
+    testProperty "fromObject . toObject == id" prop_BytestringRoundtrip,
+    testProperty "unpack . pack == id" prop_ObjectRoundtrip
     ]
